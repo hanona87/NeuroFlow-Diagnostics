@@ -1,0 +1,557 @@
+# ==============================================================================
+# NeuroFlow-Diagnostics: Master Configuration File
+# Project: Deep Learning Diagnosis of Cerebral Aneurysms
+# ==============================================================================
+
+# ==============================================================================
+# PROJECT METADATA
+# ==============================================================================
+project:
+  name: "NeuroFlow-Diagnostics"
+  version: "1.0.0"
+  title: "Deep Learning Diagnosis of Cerebral Aneurysms: An End-to-End Physics-Informed Pipeline for Rupture Risk Assessment"
+  description: "CBIO018 Year 3 Project: Three-stage deep learning pipeline for aneurysm detection and rupture risk assessment"
+  authors: ["AI Research Engineer"]
+  institution: "Medical Imaging & AI Lab"
+  date_created: "2026-08-12"
+
+# ==============================================================================
+# REPRODUCIBILITY & RANDOM SEED
+# ==============================================================================
+reproducibility:
+  seed: 42
+  deterministic: true
+  benchmark: false  # Set true for maximum speed if non-determinism acceptable
+  device: "cuda"  # "cuda" or "cpu"
+  
+# ==============================================================================
+# DATA CONFIGURATION
+# ==============================================================================
+data:
+  # Dataset paths
+  datasets_root: "./data/datasets"
+  manifests_dir: "./data/manifests"
+  processed_dir: "./data/processed"
+  
+  # Dataset selection
+  primary_dataset: "intra"  # "intra", "aneumo", or "synthetic"
+  
+  # Point cloud parameters
+  num_points: 8192  # FPS target
+  point_features: ["x", "y", "z", "nx", "ny", "nz"]  # Coordinates + normals
+  
+  # Normalization
+  normalization_method: "unit_sphere"  # "unit_sphere", "bbox", "z_score"
+  center_mode: "centroid"  # "centroid" or "origin"
+  
+  # Augmentation
+  augmentation_enabled: true
+  augmentation:
+    rotation_enabled: true
+    rotation_angle: 360
+    jitter_enabled: true
+    jitter_std: 0.01
+    dropout_enabled: true
+    dropout_rate: 0.1
+    scaling_enabled: true
+    scaling_range: [0.9, 1.1]
+  
+  # Train/Val/Test splits (patient-level)
+  splits:
+    train_ratio: 0.7
+    val_ratio: 0.15
+    test_ratio: 0.15
+    stratify_by_rupture: true
+  
+  # Data storage
+  serialization_format: "h5"  # "h5" or "pt"
+  compression: true
+  compression_level: 4
+
+# ==============================================================================
+# STAGE 1: ANEURYSM DETECTION (PointNet++)
+# ==============================================================================
+stage1_detection:
+  enabled: true
+  
+  # Architecture
+  architecture:
+    name: "PointNet++"
+    grouping: "MSG"  # "MSG" or "MRG"
+    
+    # Set Abstraction layers
+    set_abstraction:
+      - npoint: 2048
+        radius: 0.05
+        nsample: 32
+        out_channels: 64
+      
+      - npoint: 512
+        radius: 0.1
+        nsample: 32
+        out_channels: 128
+      
+      - npoint: 128
+        radius: 0.2
+        nsample: 32
+        out_channels: 256
+      
+      - npoint: 32
+        radius: 0.4
+        nsample: 32
+        out_channels: 512
+    
+    # MLP head
+    mlp_head: [512, 256, 128]
+    num_classes: 2  # Binary: aneurysm present/absent
+    dropout_rate: 0.5
+    
+    # Feature propagation
+    feature_propagation_enabled: true
+    fp_mlp: [256, 256]
+  
+  # Training hyperparameters
+  training:
+    epochs: 200
+    batch_size: 20
+    learning_rate: 2e-5
+    weight_decay: 1e-4
+    optimizer: "adam"  # "adam" or "sgd"
+    
+    # Scheduling
+    scheduler: "cosine"  # "cosine" or "exponential"
+    cosine_anneal:
+      T_max: 200
+      T_mult: 1
+      eta_min: 1e-7
+    
+    # Loss
+    loss_type: "weighted_ce"  # "weighted_ce", "focal", "focal_weighted"
+    focal_loss:
+      alpha: 0.75
+      gamma: 2.0
+    
+    # Optimization
+    gradient_clip_norm: 1.0
+    gradient_accumulation_steps: 1
+    
+    # Regularization
+    early_stopping_patience: 30
+    early_stopping_metric: "val_auc"  # "val_auc" or "val_loss"
+    
+    # Checkpointing
+    save_best_only: true
+    save_frequency: 5  # Save every N epochs
+  
+  # Evaluation
+  evaluation:
+    metrics: ["auc", "pr_auc", "accuracy", "sensitivity", "specificity", "f1", "brier_score"]
+    bootstrap_samples: 1000
+    confidence_level: 0.95
+    compute_calibration: true
+    calibration_bins: 10
+  
+  # Robustness tests
+  robustness_tests:
+    enabled: true
+    point_density_variations: [2048, 4096, 8192, 16384]
+    noise_levels: [0.0, 0.005, 0.01, 0.02]
+    crop_variants: ["dome_only", "parent_vessel_inclusive"]
+
+# ==============================================================================
+# STAGE 2: PHYSICS-INFORMED NEURAL NETWORK (PINN)
+# ==============================================================================
+stage2_pinn:
+  enabled: true
+  
+  # Physics parameters
+  physics:
+    # Fluid properties
+    density_blood: 1050.0  # kg/m³
+    viscosity_dynamic: 3.85e-3  # Pa·s (3.85 mPa·s)
+    viscosity_kinematic_computed: true  # Compute from dynamic
+    
+    # Cardiovascular parameters
+    heart_rate: 75.0  # bpm
+    cardiac_period: 0.8  # seconds
+    peak_velocity: 0.3  # m/s
+    
+    # Domain parameters
+    domain_bounds: [[-0.05, 0.05], [-0.05, 0.05], [-0.1, 0.1], [0, 0.8]]  # [x, y, z, t]
+  
+  # Network architecture
+  network:
+    input_dim: 4  # (x, y, z, t)
+    output_dim: 4  # (u, v, w, p)
+    
+    # Fully connected layers
+    hidden_layers: [64, 128, 256, 128, 64]
+    activation: "tanh"
+    
+    # Fourier feature embedding
+    fourier_features_enabled: false
+    fourier_freq_bands: 10
+  
+  # Non-dimensionalization (CRITICAL for numerical stability)
+  nondimensionalization:
+    enabled: true
+    characteristic_length: 0.01  # 1 cm
+    characteristic_velocity: 0.3  # m/s
+    characteristic_time: 0.8  # cardiac period
+  
+  # Training strategy
+  training:
+    # Collocation points
+    n_collocation_points: 20000
+    n_boundary_points: 2000
+    n_initial_condition_points: 1000
+    sampling_strategy: "uniform"  # "uniform" or "adaptive"
+    
+    # Two-stage optimization
+    stage1_optimization:
+      method: "adam"
+      epochs: 100
+      learning_rate: 1e-3
+      scheduler: "cosine"
+    
+    stage2_optimization:
+      method: "lbfgs"  # L-BFGS-B for high-precision fitting
+      max_iter: 14000
+      line_search: "strong_wolfe"
+      memory_size: 100
+    
+    # Loss weighting
+    loss_weights:
+      data_loss: 1.0
+      physics_loss: 1.0  # Continuity + Momentum
+      bc_loss: 1.0  # Boundary conditions
+      ic_loss: 1.0  # Initial conditions
+      regularization: 1e-4
+    
+    # Adaptive loss
+    adaptive_loss_enabled: false
+    adaptive_update_frequency: 100
+    
+    # Gradient normalization
+    normalize_gradients: true
+    
+    # Batch size for training data
+    batch_size_data: 32
+    batch_size_collocation: 64
+  
+  # Boundary conditions
+  boundary_conditions:
+    inlet:
+      type: "dirichlet_parabolic"
+      amplitude: 0.3  # Peak velocity
+      profile: "parabolic"  # "parabolic" or "uniform"
+    
+    walls:
+      type: "dirichlet_noslip"  # u = 0
+    
+    outlet:
+      type: "dirichlet_pressure"
+      value: 0.0
+  
+  # Validation
+  validation:
+    against_cfd_available: true
+    metrics: ["velocity_rmse", "pressure_r2", "mass_conservation", "wss_error"]
+    target_residual: 1e-13
+    target_velocity_rmse: 0.05  # 5% normalized
+  
+  # Physics constraints - which terms to include
+  physics_constraints:
+    continuity_equation: true
+    momentum_x: true
+    momentum_y: true
+    momentum_z: true
+    temporal_term: true
+    convection_term: true
+    diffusion_term: true
+  
+  # Derived quantities
+  derived_quantities:
+    wall_shear_stress: true
+    oscillatory_shear_index: true
+    time_averaged_wss: true
+    relative_residence_time: true
+
+# ==============================================================================
+# STAGE 3: MULTICHANNEL RUPTURE PREDICTION
+# ==============================================================================
+stage3_rupture:
+  enabled: true
+  
+  # Input channels per point
+  input_channels:
+    geometric:
+      - "x"
+      - "y"
+      - "z"
+      - "nx"
+      - "ny"
+      - "nz"
+    hemodynamic:
+      - "u"           # Velocity x
+      - "v"           # Velocity y
+      - "w"           # Velocity z
+      - "p"           # Pressure
+      - "wss"         # Wall Shear Stress magnitude
+      - "tawss"       # Time-Averaged WSS
+      - "osi"         # Oscillatory Shear Index
+      - "rrt"         # Relative Residence Time
+  
+  # Model architecture
+  model:
+    architecture: "PointNet++"  # PointNet++, PointNet, MLP
+    grouping: "MSG"
+    
+    set_abstraction: []  # Will inherit from Stage 1 or custom
+    
+    input_channels_count_computed: true
+    mlp_head: [256, 128, 64]
+    num_classes: 2  # Binary: ruptured/unruptured
+    dropout_rate: 0.5
+  
+  # Ablation strategies (mandatory experiments)
+  ablations:
+    1_geometry_only:
+      enabled: true
+      channels: ["x", "y", "z", "nx", "ny", "nz"]
+      expected_auc: 0.62
+    
+    2_geometry_velocity:
+      enabled: true
+      channels: ["x", "y", "z", "nx", "ny", "nz", "u", "v", "w"]
+    
+    3_geometry_pressure:
+      enabled: true
+      channels: ["x", "y", "z", "nx", "ny", "nz", "p"]
+    
+    4_geometry_wss:
+      enabled: true
+      channels: ["x", "y", "z", "nx", "ny", "nz", "wss"]
+    
+    5_geometry_osi:
+      enabled: true
+      channels: ["x", "y", "z", "nx", "ny", "nz", "osi"]
+    
+    6_geometry_rrt:
+      enabled: true
+      channels: ["x", "y", "z", "nx", "ny", "nz", "rrt"]
+    
+    7_full_multichannel:
+      enabled: true
+      channels: "all"
+      expected_auc: 0.75
+    
+    8_conventional_features:
+      enabled: true
+      method: "gradient_boosting"  # "gradient_boosting" or "logistic_regression"
+      features: ["volume", "aspect_ratio", "size_ratio", "aneurysm_angle"]
+    
+    9_crop_variants:
+      enabled: true
+      variants: ["dome_only", "parent_vessel_inclusive"]
+  
+  # Training hyperparameters
+  training:
+    epochs: 200
+    batch_size: 20
+    learning_rate: 2e-5
+    weight_decay: 1e-4
+    optimizer: "adam"
+    
+    # Scheduling
+    scheduler: "cosine"
+    cosine_anneal:
+      T_max: 200
+      T_mult: 1
+      eta_min: 1e-7
+    
+    # Loss
+    loss_type: "focal"  # "weighted_ce" or "focal"
+    focal_loss:
+      alpha: 0.75
+      gamma: 2.0
+    
+    # Early stopping
+    early_stopping_patience: 30
+    early_stopping_metric: "val_auc"
+    
+    # Uncertainty quantification
+    uncertainty_method: "ensemble"  # "ensemble" or "mc_dropout"
+    ensemble_size: 5  # Number of models for deep ensemble
+    mc_dropout_samples: 100  # MC Dropout samples
+  
+  # Evaluation
+  evaluation:
+    metrics: ["auc", "pr_auc", "accuracy", "sensitivity", "specificity", "f1", "brier_score"]
+    bootstrap_samples: 1000
+    confidence_level: 0.95
+    compute_calibration: true
+    calibration_bins: 10
+  
+  # Clinical utility
+  clinical_utility:
+    decision_curve_analysis: true
+    net_benefit_threshold_range: [0.1, 0.9]
+    threshold_optimization: true
+    optimal_threshold_metric: "youden"  # "youden" or "f1"
+
+# ==============================================================================
+# EXPERIMENTAL TRIAL CONFIGURATION
+# ==============================================================================
+experiments:
+  output_dir: "./experiments"
+  results_dir: "./results"
+  
+  trials:
+    # T0: Data Audit & Leakage Check
+    T0:
+      name: "Data Audit & Leakage Check"
+      enabled: true
+      script: "scripts/experiment_T0_data_audit.py"
+    
+    # T1: Detector Baseline
+    T1:
+      name: "Detector Baseline (PointNet++)"
+      enabled: true
+      script: "scripts/experiment_T1_detector_baseline.py"
+    
+    # T2: Detector Robustness
+    T2:
+      name: "Detector Robustness (Point Density, Noise, Crops)"
+      enabled: true
+      script: "scripts/experiment_T2_robustness.py"
+    
+    # T3: PINN Data-Only Baseline
+    T3:
+      name: "PINN Data-Only Baseline"
+      enabled: true
+      script: "scripts/experiment_T3_pinn_data_baseline.py"
+    
+    # T4: Full Physics-Informed PINN
+    T4:
+      name: "Full Physics-Informed PINN"
+      enabled: true
+      script: "scripts/experiment_T4_pinn_full.py"
+    
+    # T5: PINN Residual Ablation
+    T5:
+      name: "PINN Residual Ablation"
+      enabled: true
+      script: "scripts/experiment_T5_pinn_ablation.py"
+    
+    # T6: Rupture Morphology-Only
+    T6:
+      name: "Rupture Morphology-Only"
+      enabled: true
+      script: "scripts/experiment_T6_rupture_morphology.py"
+    
+    # T7: Rupture Flow-Only
+    T7:
+      name: "Rupture Flow-Only (Hemodynamics)"
+      enabled: true
+      script: "scripts/experiment_T7_rupture_flow.py"
+    
+    # T8: Rupture Full Multichannel (PRIMARY)
+    T8:
+      name: "Rupture Full Multichannel (PRIMARY)"
+      enabled: true
+      script: "scripts/experiment_T8_rupture_multichannel.py"
+    
+    # T9: Biomarker Channel Ablation
+    T9:
+      name: "Biomarker Channel Ablation"
+      enabled: true
+      script: "scripts/experiment_T9_channel_ablation.py"
+    
+    # T10: Architecture Comparison
+    T10:
+      name: "Architecture Comparison (PointNet vs PointNet++ vs MLP)"
+      enabled: true
+      script: "scripts/experiment_T10_architecture_comparison.py"
+    
+    # T11: External Validation Protocol
+    T11:
+      name: "External Validation (Leave-One-Site-Out)"
+      enabled: true
+      script: "scripts/experiment_T11_external_validation.py"
+    
+    # T12: Clinical Utility
+    T12:
+      name: "Clinical Utility (Decision Curve Analysis)"
+      enabled: true
+      script: "scripts/experiment_T12_clinical_utility.py"
+    
+    # T13: Uncertainty Quantification
+    T13:
+      name: "Uncertainty Quantification & OOD Detection"
+      enabled: true
+      script: "scripts/experiment_T13_uncertainty.py"
+
+# ==============================================================================
+# LOGGING & MONITORING
+# ==============================================================================
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  logfile: "./results/training.log"
+  tensorboard_enabled: true
+  tensorboard_logdir: "./results/tensorboard"
+  wandb_enabled: false  # Set to true to use Weights & Biases
+  wandb_project: "neuroflow-diagnostics"
+  wandb_entity: null  # Your W&B username
+
+# ==============================================================================
+# HARDWARE & PERFORMANCE
+# ==============================================================================
+hardware:
+  device: "cuda"  # "cuda" or "cpu"
+  gpu_ids: [0]
+  num_workers: 4
+  pin_memory: true
+  mixed_precision: false  # Use AMP for faster training (PyTorch 1.6+)
+  
+  # Memory management
+  checkpoint_dir: "./checkpoints"
+  max_checkpoint_keep: 3
+  
+  # Profiling
+  profile_enabled: false
+  profile_wait: 1000
+  profile_warmup: 1000
+  profile_active: 100
+
+# ==============================================================================
+# REPORT GENERATION
+# ==============================================================================
+reports:
+  output_dir: "./reports"
+  formats: ["markdown", "html", "pdf"]
+  include_sections:
+    - abstract
+    - introduction
+    - methods
+    - results
+    - discussion
+    - limitations
+    - future_work
+    - reproducibility_checklist
+  
+  plots:
+    roc_curves: true
+    pr_curves: true
+    calibration_plots: true
+    decision_curves: true
+    loss_curves: true
+    confusion_matrices: true
+    reliability_diagrams: true
+    uncertainty_histograms: true
+  
+  tables:
+    ablation_summary: true
+    metrics_comparison: true
+    trial_results: true
+    statistical_significance: true
